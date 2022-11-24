@@ -1722,8 +1722,8 @@ if [ -n "${GNUTLS_NEXT_CLI:-}" ]; then
 fi
 
 # Allow SHA-1, because many of our test certificates use it
-P_SRV="$P_SRV allow_sha1=1"
-P_CLI="$P_CLI allow_sha1=1"
+# P_SRV="$P_SRV allow_sha1=1"
+# P_CLI="$P_CLI allow_sha1=1"
 
 # Also pick a unique name for intermediate files
 SRV_OUT="srv_out.$$"
@@ -1813,8 +1813,8 @@ requires_hash_alg SHA_256
 run_test    "TLS: password protected server key, two certificates" \
             "$P_SRV \
               key_file=data_files/server5.key.enc key_pwd=PolarSSLTest crt_file=data_files/server5.crt \
-              key_file2=data_files/server2.key.enc key_pwd2=PolarSSLTest crt_file2=data_files/server2.crt" \
-            "$P_CLI" \
+              key_file2=data_files/server2.key.enc key_pwd2=PolarSSLTest crt_file2=data_files/server2.crt allow_sha1=1" \
+            "$P_CLI allow_sha1=1" \
             0
 
 requires_config_enabled MBEDTLS_SSL_PROTO_TLS1_2
@@ -2449,7 +2449,7 @@ run_test    "Context-specific CRT verification callback" \
 # Tests for SHA-1 support
 requires_config_enabled MBEDTLS_SSL_PROTO_TLS1_2
 run_test    "SHA-1 forbidden by default in server certificate" \
-            "$P_SRV key_file=data_files/server2.key crt_file=data_files/server2.crt" \
+            "$P_SRV key_file=data_files/server2.key crt_file=data_files/server2-sha1.crt" \
             "$P_CLI debug_level=2 allow_sha1=0" \
             1 \
             -c "The certificate is signed with an unacceptable hash"
@@ -5163,7 +5163,7 @@ requires_gnutls
 requires_config_enabled MBEDTLS_SSL_PROTO_TLS1_2
 run_test    "DER format: no trailing bytes" \
             "$P_SRV crt_file=data_files/server5-der0.crt \
-             key_file=data_files/server5.key" \
+             key_file=data_files/server5.key allow_sha1=1" \
             "$G_CLI localhost" \
             0 \
             -c "Handshake was completed" \
@@ -5172,7 +5172,7 @@ requires_gnutls
 requires_config_enabled MBEDTLS_SSL_PROTO_TLS1_2
 run_test    "DER format: with a trailing zero byte" \
             "$P_SRV crt_file=data_files/server5-der1a.crt \
-             key_file=data_files/server5.key" \
+             key_file=data_files/server5.key allow_sha1=1" \
             "$G_CLI localhost" \
             0 \
             -c "Handshake was completed" \
@@ -5181,7 +5181,7 @@ requires_gnutls
 requires_config_enabled MBEDTLS_SSL_PROTO_TLS1_2
 run_test    "DER format: with a trailing random byte" \
             "$P_SRV crt_file=data_files/server5-der1b.crt \
-             key_file=data_files/server5.key" \
+             key_file=data_files/server5.key allow_sha1=1" \
             "$G_CLI localhost" \
             0 \
             -c "Handshake was completed" \
@@ -5190,7 +5190,7 @@ requires_gnutls
 requires_config_enabled MBEDTLS_SSL_PROTO_TLS1_2
 run_test    "DER format: with 2 trailing random bytes" \
             "$P_SRV crt_file=data_files/server5-der2.crt \
-             key_file=data_files/server5.key" \
+             key_file=data_files/server5.key allow_sha1=1" \
             "$G_CLI localhost" \
             0 \
             -c "Handshake was completed" \
@@ -5199,7 +5199,7 @@ requires_gnutls
 requires_config_enabled MBEDTLS_SSL_PROTO_TLS1_2
 run_test    "DER format: with 4 trailing random bytes" \
             "$P_SRV crt_file=data_files/server5-der4.crt \
-             key_file=data_files/server5.key" \
+             key_file=data_files/server5.key allow_sha1=1" \
             "$G_CLI localhost" \
             0 \
             -c "Handshake was completed" \
@@ -5208,7 +5208,7 @@ requires_gnutls
 requires_config_enabled MBEDTLS_SSL_PROTO_TLS1_2
 run_test    "DER format: with 8 trailing random bytes" \
             "$P_SRV crt_file=data_files/server5-der8.crt \
-             key_file=data_files/server5.key" \
+             key_file=data_files/server5.key allow_sha1=1" \
             "$G_CLI localhost" \
             0 \
             -c "Handshake was completed" \
@@ -5217,7 +5217,7 @@ requires_gnutls
 requires_config_enabled MBEDTLS_SSL_PROTO_TLS1_2
 run_test    "DER format: with 9 trailing random bytes" \
             "$P_SRV crt_file=data_files/server5-der9.crt \
-             key_file=data_files/server5.key" \
+             key_file=data_files/server5.key allow_sha1=1" \
             "$G_CLI localhost" \
             0 \
             -c "Handshake was completed" \
@@ -6561,7 +6561,7 @@ requires_config_enabled MBEDTLS_SSL_PROTO_TLS1_2
 run_test    "keyUsage srv: RSA, digitalSignature -> (EC)DHE-RSA" \
             "$P_SRV key_file=data_files/server2.key \
              crt_file=data_files/server2.ku-ds.crt" \
-            "$P_CLI" \
+            "$P_CLI allow_sha1=1" \
             0 \
             -c "Ciphersuite is TLS-[EC]*DHE-RSA-WITH-"
 
@@ -6569,7 +6569,7 @@ requires_config_enabled MBEDTLS_SSL_PROTO_TLS1_2
 run_test    "keyUsage srv: RSA, keyEncipherment -> RSA" \
             "$P_SRV key_file=data_files/server2.key \
              crt_file=data_files/server2.ku-ke.crt" \
-            "$P_CLI" \
+            "$P_CLI allow_sha1=1" \
             0 \
             -c "Ciphersuite is TLS-RSA-WITH-"
 
@@ -6614,7 +6614,7 @@ run_test    "keyUsage cli: DigitalSignature+KeyEncipherment, RSA: OK" \
             "$O_SRV -tls1_2 -key data_files/server2.key \
              -cert data_files/server2.ku-ds_ke.crt" \
             "$P_CLI debug_level=1 \
-             force_ciphersuite=TLS-RSA-WITH-AES-128-CBC-SHA" \
+             force_ciphersuite=TLS-RSA-WITH-AES-128-CBC-SHA allow_sha1=1" \
             0 \
             -C "bad certificate (usage extensions)" \
             -C "Processing of the Certificate handshake message failed" \
@@ -6625,7 +6625,7 @@ run_test    "keyUsage cli: DigitalSignature+KeyEncipherment, DHE-RSA: OK" \
             "$O_SRV -tls1_2 -key data_files/server2.key \
              -cert data_files/server2.ku-ds_ke.crt" \
             "$P_CLI debug_level=1 \
-             force_ciphersuite=TLS-DHE-RSA-WITH-AES-128-CBC-SHA" \
+             force_ciphersuite=TLS-DHE-RSA-WITH-AES-128-CBC-SHA allow_sha1=1" \
             0 \
             -C "bad certificate (usage extensions)" \
             -C "Processing of the Certificate handshake message failed" \
@@ -6636,7 +6636,7 @@ run_test    "keyUsage cli: KeyEncipherment, RSA: OK" \
             "$O_SRV -tls1_2 -key data_files/server2.key \
              -cert data_files/server2.ku-ke.crt" \
             "$P_CLI debug_level=1 \
-             force_ciphersuite=TLS-RSA-WITH-AES-128-CBC-SHA" \
+             force_ciphersuite=TLS-RSA-WITH-AES-128-CBC-SHA allow_sha1=1" \
             0 \
             -C "bad certificate (usage extensions)" \
             -C "Processing of the Certificate handshake message failed" \
@@ -6647,7 +6647,7 @@ run_test    "keyUsage cli: KeyEncipherment, DHE-RSA: fail" \
             "$O_SRV -tls1_2 -key data_files/server2.key \
              -cert data_files/server2.ku-ke.crt" \
             "$P_CLI debug_level=1 \
-             force_ciphersuite=TLS-DHE-RSA-WITH-AES-128-CBC-SHA" \
+             force_ciphersuite=TLS-DHE-RSA-WITH-AES-128-CBC-SHA allow_sha1=1" \
             1 \
             -c "bad certificate (usage extensions)" \
             -c "Processing of the Certificate handshake message failed" \
@@ -6670,7 +6670,7 @@ run_test    "keyUsage cli: DigitalSignature, DHE-RSA: OK" \
             "$O_SRV -tls1_2 -key data_files/server2.key \
              -cert data_files/server2.ku-ds.crt" \
             "$P_CLI debug_level=1 \
-             force_ciphersuite=TLS-DHE-RSA-WITH-AES-128-CBC-SHA" \
+             force_ciphersuite=TLS-DHE-RSA-WITH-AES-128-CBC-SHA allow_sha1=1" \
             0 \
             -C "bad certificate (usage extensions)" \
             -C "Processing of the Certificate handshake message failed" \
@@ -6681,7 +6681,7 @@ run_test    "keyUsage cli: DigitalSignature, RSA: fail" \
             "$O_SRV -tls1_2 -key data_files/server2.key \
              -cert data_files/server2.ku-ds.crt" \
             "$P_CLI debug_level=1 \
-             force_ciphersuite=TLS-RSA-WITH-AES-128-CBC-SHA" \
+             force_ciphersuite=TLS-RSA-WITH-AES-128-CBC-SHA allow_sha1=1" \
             1 \
             -c "bad certificate (usage extensions)" \
             -c "Processing of the Certificate handshake message failed" \
@@ -6776,7 +6776,7 @@ run_test    "keyUsage cli 1.3: KeyAgreement, ECDSA: fail" \
 
 requires_config_enabled MBEDTLS_SSL_PROTO_TLS1_2
 run_test    "keyUsage cli-auth: RSA, DigitalSignature: OK" \
-            "$P_SRV debug_level=1 auth_mode=optional" \
+            "$P_SRV debug_level=1 auth_mode=optional allow_sha1=1" \
             "$O_CLI -key data_files/server2.key \
              -cert data_files/server2.ku-ds.crt" \
             0 \
@@ -6795,7 +6795,7 @@ run_test    "keyUsage cli-auth: RSA, KeyEncipherment: fail (soft)" \
 
 requires_config_enabled MBEDTLS_SSL_PROTO_TLS1_2
 run_test    "keyUsage cli-auth: RSA, KeyEncipherment: fail (hard)" \
-            "$P_SRV debug_level=1 auth_mode=required" \
+            "$P_SRV debug_level=1 auth_mode=required allow_sha1=1" \
             "$O_CLI -key data_files/server2.key \
              -cert data_files/server2.ku-ke.crt" \
             1 \
