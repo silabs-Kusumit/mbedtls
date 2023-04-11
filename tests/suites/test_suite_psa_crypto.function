@@ -8706,6 +8706,19 @@ void derive_output(int alg_arg,
         switch (steps[i]) {
             case 0:
                 break;
+            case PSA_KEY_DERIVATION_INPUT_COST:
+                TEST_EQUAL(psa_key_derivation_input_integer(
+                                &operation, steps[i],
+                                *(inputs[i]->x)),
+                            statuses[i]);
+                if (statuses[i] != PSA_SUCCESS) {
+                    goto exit;
+                }
+                break;
+            case PSA_KEY_DERIVATION_INPUT_PASSWORD:
+                if (!PSA_ALG_IS_PBKDF2_HMAC(alg)) {
+                    goto exit;
+                }
             case PSA_KEY_DERIVATION_INPUT_SECRET:
                 switch (key_input_type) {
                     case 0: // input bytes

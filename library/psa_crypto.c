@@ -5439,6 +5439,39 @@ static psa_status_t psa_key_derivation_tls12_ecjpake_to_pms_read(
 }
 #endif
 
+#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC)
+static psa_status_t psa_key_derivation_pbkdf2_read(
+    psa_pbkdf2_key_derivation_t *pbkdf2,
+    psa_algorithm_t kdf_alg,
+    uint8_t *output,
+    size_t output_length)
+{
+    psa_algorithm_t hash_alg = PSA_ALG_HKDF_GET_HASH(kdf_alg);
+    psa_status_t status;
+
+    switch (pbkdf2->state) {
+        case PSA_PBKDF2_STATE_PASSWORD_SET:
+            pbkdf2->state = PSA_PBKDF2_STATE_OUTPUT;
+            break;
+        case PSA_PBKDF2_STATE_OUTPUT:
+            break;
+        default:
+            return PSA_ERROR_BAD_STATE;
+    }
+
+    pbkdf2->state = PSA_PBKDF2_STATE_OUTPUT;
+    status = mbedtls_to_psa_error(
+        mbedtls_pkcs5_pbkdf2_hmac_ext(mbedtls_hash_info_md_from_psa(hash_alg),
+                                      pbkdf2->password,
+                                      pbkdf2->password_length,
+                                      pbkdf2->salt, pbkdf2->salt_length,
+                                      pbkdf2->input_cost,
+                                      output_length, output));
+
+    return status;
+}
+#endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC */
+
 psa_status_t psa_key_derivation_output_bytes(
     psa_key_derivation_operation_t *operation,
     uint8_t *output,
@@ -5492,6 +5525,13 @@ psa_status_t psa_key_derivation_output_bytes(
             &operation->ctx.tls12_ecjpake_to_pms, output, output_length);
     } else
 #endif /* MBEDTLS_PSA_BUILTIN_ALG_TLS12_ECJPAKE_TO_PMS */
+#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC)
+    if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg)) {
+        status = psa_key_derivation_pbkdf2_read(
+            &operation->ctx.pbkdf2, kdf_alg,
+            output, output_length);
+    } else
+#endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC */
 
     {
         (void) kdf_alg;
@@ -6406,7 +6446,7 @@ static psa_status_t psa_tls12_ecjpake_to_pms_input(
 
 #if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC)
 static psa_status_t psa_pbkdf2_set_input_cost(
-    psa_pbkdf2_t *pbkdf2,
+    psa_pbkdf2_key_derivation_t *pbkdf2,
     psa_key_derivation_step_t step,
     uint64_t data)
 {
@@ -6428,9 +6468,9 @@ static psa_status_t psa_pbkdf2_set_input_cost(
     return PSA_SUCCESS;
 }
 
-static psa_status_t psa_pbkdf2_set_salt(psa_pbkdf2_t *pbkdf2,
-                                             const uint8_t *data,
-                                             size_t data_length)
+static psa_status_t psa_pbkdf2_set_salt(psa_pbkdf2_key_derivation_t *pbkdf2,
+                                        const uint8_t *data,
+                                        size_t data_length)
 {
     uint8_t *prev_salt;
     size_t prev_salt_length;
@@ -6471,10 +6511,9 @@ static psa_status_t psa_pbkdf2_set_salt(psa_pbkdf2_t *pbkdf2,
     return PSA_SUCCESS;
 }
 
-static psa_status_t psa_pbkdf2_set_password(
-    psa_pbkdf2_t *pbkdf2,
-    const uint8_t *data,
-    size_t data_length)
+static psa_status_t psa_pbkdf2_set_password(psa_pbkdf2_key_derivation_t *pbkdf2,
+                                            const uint8_t *data,
+                                            size_t data_length)
 {
     if (pbkdf2->state != PSA_PBKDF2_STATE_SALT_SET) {
         return PSA_ERROR_BAD_STATE;
@@ -6495,10 +6534,10 @@ static psa_status_t psa_pbkdf2_set_password(
     return PSA_SUCCESS;
 }
 
-static psa_status_t psa_pbkdf2_input(psa_pbkdf2_t *pbkdf2,
-                                          psa_key_derivation_step_t step,
-                                          const uint8_t *data,
-                                          size_t data_length)
+static psa_status_t psa_pbkdf2_input(psa_pbkdf2_key_derivation_t *pbkdf2,
+                                     psa_key_derivation_step_t step,
+                                     const uint8_t *data,
+                                     size_t data_length)
 {
     switch (step) {
         case PSA_KEY_DERIVATION_INPUT_SALT:
