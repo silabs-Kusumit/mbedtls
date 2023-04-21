@@ -4996,7 +4996,8 @@ psa_status_t psa_aead_abort(psa_aead_operation_t *operation)
 
 #if defined(BUILTIN_ALG_ANY_HKDF) || \
     defined(MBEDTLS_PSA_BUILTIN_ALG_TLS12_PRF) || \
-    defined(MBEDTLS_PSA_BUILTIN_ALG_TLS12_PSK_TO_MS)
+    defined(MBEDTLS_PSA_BUILTIN_ALG_TLS12_PSK_TO_MS) || \
+    defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC)
 static psa_status_t psa_key_derivation_start_hmac(
     psa_mac_operation_t *operation,
     psa_algorithm_t hash_alg,
@@ -5440,17 +5441,95 @@ static psa_status_t psa_key_derivation_tls12_ecjpake_to_pms_read(
 #endif
 
 #if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC)
+static psa_status_t psa_key_derivation_pbkdf2_generate_block(
+    psa_pbkdf2_key_derivation_t *pbkdf2,
+    psa_algorithm_t kdf_alg)
+{
+    psa_status_t status, cleanup_status;
+    psa_mac_operation_t hmac = PSA_MAC_OPERATION_INIT;
+    psa_algorithm_t hash_alg = PSA_ALG_PBKDF2_HMAC_GET_HASH(kdf_alg);
+    uint8_t hash_length = PSA_HASH_LENGTH(hash_alg);
+    size_t hmac_output_length;
+    uint8_t U_even[PSA_HASH_MAX_SIZE];  // Names are for now
+    uint8_t U_odd[PSA_HASH_MAX_SIZE];   // Names are for now
+    uint8_t i, j;
+
+    status = psa_key_derivation_start_hmac(&hmac,
+                                           hash_alg,
+                                           pbkdf2->password,
+                                           pbkdf2->password_length);
+    if (status != PSA_SUCCESS) {
+        goto cleanup;
+    }
+    // U1 ends up in U_odd
+    status = psa_mac_update(&hmac, pbkdf2->salt, pbkdf2->salt_length);
+    if (status != PSA_SUCCESS) {
+        goto cleanup;
+    }
+    status = psa_mac_update(&hmac, pbkdf2->block_number,
+                            sizeof(pbkdf2->block_number));
+    if (status != PSA_SUCCESS) {
+        goto cleanup;
+    }
+    status = psa_mac_sign_finish(&hmac, U_odd, hash_length,
+                                 &hmac_output_length);
+    if (status != PSA_SUCCESS) {
+        goto cleanup;
+    }
+
+    memcpy(U_even, U_odd, hmac_output_length);
+
+    for (i = 1; i < pbkdf2->input_cost; i++) {
+        // U2 ends up in U_even
+        status = psa_key_derivation_start_hmac(&hmac,
+                                               hash_alg,
+                                               pbkdf2->password,
+                                               pbkdf2->password_length);
+        if (status != PSA_SUCCESS) {
+            goto cleanup;
+        }
+        status = psa_mac_update(&hmac, U_even, hash_length);
+        if (status != PSA_SUCCESS) {
+            goto cleanup;
+        }
+        status = psa_mac_sign_finish(&hmac, U_even, hash_length,
+                                     &hmac_output_length);
+        if (status != PSA_SUCCESS) {
+            goto cleanup;
+        }
+
+        // U1 xor U2
+        for (j = 0; j < hash_length; j++) {
+            U_odd[j] ^= U_even[j];
+        }
+    }
+
+    memcpy(pbkdf2->output_block, U_odd, hash_length);
+
+cleanup:
+    /* Zeroise buffers to clear sensitive data from memory. */
+    mbedtls_platform_zeroize(U_odd, PSA_HASH_MAX_SIZE);
+    mbedtls_platform_zeroize(U_even, PSA_HASH_MAX_SIZE);
+    cleanup_status = psa_mac_abort(&hmac);
+    if(status == PSA_SUCCESS && cleanup_status != PSA_SUCCESS) {
+        status = cleanup_status;
+    }
+    return status;
+}
+
 static psa_status_t psa_key_derivation_pbkdf2_read(
     psa_pbkdf2_key_derivation_t *pbkdf2,
     psa_algorithm_t kdf_alg,
     uint8_t *output,
     size_t output_length)
 {
-    psa_algorithm_t hash_alg = PSA_ALG_HKDF_GET_HASH(kdf_alg);
     psa_status_t status;
+    psa_algorithm_t hash_alg = PSA_ALG_PBKDF2_HMAC_GET_HASH(kdf_alg);
+    uint8_t hash_length = PSA_HASH_LENGTH(hash_alg);
 
     switch (pbkdf2->state) {
         case PSA_PBKDF2_STATE_PASSWORD_SET:
+            pbkdf2->offset_in_block = PSA_HASH_LENGTH(hash_alg);
             pbkdf2->state = PSA_PBKDF2_STATE_OUTPUT;
             break;
         case PSA_PBKDF2_STATE_OUTPUT:
@@ -5459,16 +5538,36 @@ static psa_status_t psa_key_derivation_pbkdf2_read(
             return PSA_ERROR_BAD_STATE;
     }
 
-    pbkdf2->state = PSA_PBKDF2_STATE_OUTPUT;
-    status = mbedtls_to_psa_error(
-        mbedtls_pkcs5_pbkdf2_hmac_ext(mbedtls_hash_info_md_from_psa(hash_alg),
-                                      pbkdf2->password,
-                                      pbkdf2->password_length,
-                                      pbkdf2->salt, pbkdf2->salt_length,
-                                      pbkdf2->input_cost,
-                                      output_length, output));
+    while (output_length != 0) {
 
-    return status;
+        uint8_t n = hash_length - pbkdf2->offset_in_block;
+        if (n > output_length) {
+            n = (uint8_t) output_length;
+        }
+        memcpy(output, pbkdf2->output_block + pbkdf2->offset_in_block, n);
+        output += n;
+        output_length -= n;
+        pbkdf2->offset_in_block += n;
+
+        if (output_length == 0) {
+            break;
+        }
+
+        /* We need a new block */
+        pbkdf2->offset_in_block = 0;
+        for(uint8_t i = 4; i > 0; i--) {
+            if(++(pbkdf2->block_number)[i - 1] != 0) {
+                break;
+            }
+        }
+
+        status = psa_key_derivation_pbkdf2_generate_block(pbkdf2, kdf_alg);
+        if (status != PSA_SUCCESS) {
+            return status;
+        }
+    }
+
+    return PSA_SUCCESS;
 }
 #endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC */
 

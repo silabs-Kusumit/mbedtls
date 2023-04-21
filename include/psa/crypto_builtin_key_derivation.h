@@ -122,6 +122,9 @@ typedef struct {
     size_t MBEDTLS_PRIVATE(salt_length);
     uint8_t *MBEDTLS_PRIVATE(password);
     size_t MBEDTLS_PRIVATE(password_length);
+    uint8_t MBEDTLS_PRIVATE(output_block)[PSA_HASH_MAX_SIZE];
+    uint8_t MBEDTLS_PRIVATE(offset_in_block);
+    uint8_t MBEDTLS_PRIVATE(block_number)[4];
 } psa_pbkdf2_key_derivation_t;
 #endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC */
 #endif /* PSA_CRYPTO_BUILTIN_KEY_DERIVATION_H */
