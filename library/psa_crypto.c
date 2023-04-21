@@ -6561,6 +6561,9 @@ static psa_status_t psa_pbkdf2_set_input_cost(
         return PSA_ERROR_INVALID_ARGUMENT;
     }
 #endif
+    if (data == 0) {
+        return PSA_ERROR_INVALID_ARGUMENT;
+    }
     pbkdf2->input_cost = data;
     pbkdf2->state = PSA_PBKDF2_STATE_INPUT_COST_SET;
 
@@ -6599,6 +6602,7 @@ static psa_status_t psa_pbkdf2_set_salt(psa_pbkdf2_key_derivation_t *pbkdf2,
             memcpy(pbkdf2->salt, prev_salt, prev_salt_length);
             memcpy(pbkdf2->salt + prev_salt_length, data,
             data_length);
+            pbkdf2->salt_length += data_length;
             mbedtls_free(prev_salt);
         }
     } else {
@@ -6820,9 +6824,10 @@ psa_status_t psa_key_derivation_input_key(
         return status;
     }
 
-    /* Passing a key object as a SECRET input unlocks the permission
-     * to output to a key object. */
-    if (step == PSA_KEY_DERIVATION_INPUT_SECRET) {
+    /* Passing a key object as a SECRET or PASSWORD input unlocks the
+     * permission to output to a key object. */
+    if (step == PSA_KEY_DERIVATION_INPUT_SECRET ||
+        step == PSA_KEY_DERIVATION_INPUT_PASSWORD) {
         operation->can_output_key = 1;
     }
 

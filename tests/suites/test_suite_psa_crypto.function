@@ -8746,9 +8746,14 @@ void derive_output(int alg_arg,
                                       PSA_TLS12_PSK_TO_MS_PSK_MAX_SIZE);
                         }
 
-                        PSA_ASSERT(psa_key_derivation_input_key(&operation,
+                        TEST_EQUAL(psa_key_derivation_input_key(&operation,
                                                                 steps[i],
-                                                                keys[i]));
+                                                                keys[i]),
+                                   statuses[i]);
+
+                        if (statuses[i] != PSA_SUCCESS) {
+                            goto exit;
+                        }
                         break;
                     default:
                         TEST_ASSERT(!"default case not supported");
