@@ -116,6 +116,7 @@ typedef enum {
 } psa_pbkdf2_key_derivation_state_t;
 
 typedef struct {
+    psa_algorithm_t MBEDTLS_PRIVATE(pbkdf2_alg);
     psa_pbkdf2_key_derivation_state_t MBEDTLS_PRIVATE(state);
     uint64_t MBEDTLS_PRIVATE(input_cost);
     uint8_t *MBEDTLS_PRIVATE(salt);
@@ -123,7 +124,7 @@ typedef struct {
     uint8_t *MBEDTLS_PRIVATE(password);
     size_t MBEDTLS_PRIVATE(password_length);
     uint8_t MBEDTLS_PRIVATE(output_block)[PSA_HASH_MAX_SIZE];
-    uint8_t MBEDTLS_PRIVATE(offset_in_block);
+    uint8_t MBEDTLS_PRIVATE(bytes_used);
     uint8_t MBEDTLS_PRIVATE(block_number)[4];
 } psa_pbkdf2_key_derivation_t;
 #endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC */

@@ -5175,14 +5175,14 @@ static psa_status_t psa_key_derivation_hkdf_read(psa_hkdf_key_derivation_t *hkdf
 
     while (output_length != 0) {
         /* Copy what remains of the current block */
-        uint8_t n = hash_length - hkdf->offset_in_block;
+        uint8_t n = hash_length - hkdf->bytes_used;
         if (n > output_length) {
             n = (uint8_t) output_length;
         }
-        memcpy(output, hkdf->output_block + hkdf->offset_in_block, n);
+        memcpy(output, hkdf->output_block + hkdf->bytes_used, n);
         output += n;
         output_length -= n;
-        hkdf->offset_in_block += n;
+        hkdf->bytes_used += n;
         if (output_length == 0) {
             break;
         }
@@ -5197,7 +5197,7 @@ static psa_status_t psa_key_derivation_hkdf_read(psa_hkdf_key_derivation_t *hkdf
 
         /* We need a new block */
         ++hkdf->block_number;
-        hkdf->offset_in_block = 0;
+        hkdf->bytes_used = 0;
 
         status = psa_key_derivation_start_hmac(&hkdf->hmac,
                                                hash_alg,
@@ -5446,14 +5446,25 @@ static psa_status_t psa_key_derivation_pbkdf2_generate_block(
     psa_algorithm_t kdf_alg)
 {
     psa_status_t status, cleanup_status;
-    psa_mac_operation_t hmac = PSA_MAC_OPERATION_INIT;
+    
     psa_algorithm_t hash_alg = PSA_ALG_PBKDF2_HMAC_GET_HASH(kdf_alg);
     uint8_t hash_length = PSA_HASH_LENGTH(hash_alg);
     size_t hmac_output_length;
-    uint8_t U_even[PSA_HASH_MAX_SIZE];  // Names are for now
-    uint8_t U_odd[PSA_HASH_MAX_SIZE];   // Names are for now
+    uint8_t U_i[PSA_HASH_MAX_SIZE];
+    uint8_t U_accumulator[PSA_HASH_MAX_SIZE];
     uint8_t i, j;
+    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
 
+    psa_set_key_type(&attributes, PSA_KEY_TYPE_HMAC);
+    psa_set_key_bits(&attributes, PSA_BYTES_TO_BITS(hmac_key_length));
+    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_HASH);
+
+    status = psa_driver_wrapper_mac_compute(
+        &attributes,
+        pbkdf2->password, pbkdf2->password_length,
+        hash_alg,
+        input, input_length,
+        U_i, hash_length, hmac_output_length);
     status = psa_key_derivation_start_hmac(&hmac,
                                            hash_alg,
                                            pbkdf2->password,
@@ -5461,7 +5472,6 @@ static psa_status_t psa_key_derivation_pbkdf2_generate_block(
     if (status != PSA_SUCCESS) {
         goto cleanup;
     }
-    // U1 ends up in U_odd
     status = psa_mac_update(&hmac, pbkdf2->salt, pbkdf2->salt_length);
     if (status != PSA_SUCCESS) {
         goto cleanup;
@@ -5471,16 +5481,15 @@ static psa_status_t psa_key_derivation_pbkdf2_generate_block(
     if (status != PSA_SUCCESS) {
         goto cleanup;
     }
-    status = psa_mac_sign_finish(&hmac, U_odd, hash_length,
+    status = psa_mac_sign_finish(&hmac, U_i, hash_length,
                                  &hmac_output_length);
     if (status != PSA_SUCCESS) {
         goto cleanup;
     }
 
-    memcpy(U_even, U_odd, hmac_output_length);
+    memcpy(U_accumulator, U_i, hmac_output_length);
 
     for (i = 1; i < pbkdf2->input_cost; i++) {
-        // U2 ends up in U_even
         status = psa_key_derivation_start_hmac(&hmac,
                                                hash_alg,
                                                pbkdf2->password,
@@ -5488,11 +5497,11 @@ static psa_status_t psa_key_derivation_pbkdf2_generate_block(
         if (status != PSA_SUCCESS) {
             goto cleanup;
         }
-        status = psa_mac_update(&hmac, U_even, hash_length);
+        status = psa_mac_update(&hmac, U_i, hash_length);
         if (status != PSA_SUCCESS) {
             goto cleanup;
         }
-        status = psa_mac_sign_finish(&hmac, U_even, hash_length,
+        status = psa_mac_sign_finish(&hmac, U_i, hash_length,
                                      &hmac_output_length);
         if (status != PSA_SUCCESS) {
             goto cleanup;
@@ -5500,16 +5509,16 @@ static psa_status_t psa_key_derivation_pbkdf2_generate_block(
 
         // U1 xor U2
         for (j = 0; j < hash_length; j++) {
-            U_odd[j] ^= U_even[j];
+            U_accumulator[j] ^= U_i[j];
         }
     }
 
-    memcpy(pbkdf2->output_block, U_odd, hash_length);
+    memcpy(pbkdf2->output_block, U_accumulator, hash_length);
 
 cleanup:
     /* Zeroise buffers to clear sensitive data from memory. */
-    mbedtls_platform_zeroize(U_odd, PSA_HASH_MAX_SIZE);
-    mbedtls_platform_zeroize(U_even, PSA_HASH_MAX_SIZE);
+    mbedtls_platform_zeroize(U_accumulator, PSA_HASH_MAX_SIZE);
+    mbedtls_platform_zeroize(U_i, PSA_HASH_MAX_SIZE);
     cleanup_status = psa_mac_abort(&hmac);
     if(status == PSA_SUCCESS && cleanup_status != PSA_SUCCESS) {
         status = cleanup_status;
@@ -5529,7 +5538,7 @@ static psa_status_t psa_key_derivation_pbkdf2_read(
 
     switch (pbkdf2->state) {
         case PSA_PBKDF2_STATE_PASSWORD_SET:
-            pbkdf2->offset_in_block = PSA_HASH_LENGTH(hash_alg);
+            pbkdf2->bytes_used = PSA_HASH_LENGTH(hash_alg);
             pbkdf2->state = PSA_PBKDF2_STATE_OUTPUT;
             break;
         case PSA_PBKDF2_STATE_OUTPUT:
@@ -5540,21 +5549,21 @@ static psa_status_t psa_key_derivation_pbkdf2_read(
 
     while (output_length != 0) {
 
-        uint8_t n = hash_length - pbkdf2->offset_in_block;
+        uint8_t n = hash_length - pbkdf2->bytes_used;
         if (n > output_length) {
             n = (uint8_t) output_length;
         }
-        memcpy(output, pbkdf2->output_block + pbkdf2->offset_in_block, n);
+        memcpy(output, pbkdf2->output_block + pbkdf2->bytes_used, n);
         output += n;
         output_length -= n;
-        pbkdf2->offset_in_block += n;
+        pbkdf2->bytes_used += n;
 
         if (output_length == 0) {
             break;
         }
 
         /* We need a new block */
-        pbkdf2->offset_in_block = 0;
+        pbkdf2->bytes_used = 0;
         for(uint8_t i = 4; i > 0; i--) {
             if(++(pbkdf2->block_number)[i - 1] != 0) {
                 break;
@@ -6268,13 +6277,13 @@ static psa_status_t psa_hkdf_input(psa_hkdf_key_derivation_t *hkdf,
             if (PSA_ALG_IS_HKDF_EXTRACT(kdf_alg)) {
                 /* The only block of output is the PRK. */
                 memcpy(hkdf->output_block, hkdf->prk, PSA_HASH_LENGTH(hash_alg));
-                hkdf->offset_in_block = 0;
+                hkdf->bytes_used = 0;
             } else
 #endif /* MBEDTLS_PSA_BUILTIN_ALG_HKDF_EXTRACT */
             {
                 /* Block 0 is empty, and the next block will be
                  * generated by psa_key_derivation_hkdf_read(). */
-                hkdf->offset_in_block = PSA_HASH_LENGTH(hash_alg);
+                hkdf->bytes_used = PSA_HASH_LENGTH(hash_alg);
             }
 
             return PSA_SUCCESS;
@@ -6623,6 +6632,7 @@ static psa_status_t psa_pbkdf2_set_password(psa_pbkdf2_key_derivation_t *pbkdf2,
     }
 
     if (data_length != 0) {
+        if ()
         pbkdf2->password = mbedtls_calloc(1, data_length);
         if (pbkdf2->password == NULL) {
             return PSA_ERROR_INSUFFICIENT_MEMORY;
