@@ -8709,7 +8709,7 @@ void derive_output(int alg_arg,
             case PSA_KEY_DERIVATION_INPUT_COST:
                 TEST_EQUAL(psa_key_derivation_input_integer(
                                 &operation, steps[i],
-                                *(inputs[i]->x)),
+                                parse_binary_string(inputs[i])),
                             statuses[i]);
                 if (statuses[i] != PSA_SUCCESS) {
                     goto exit;

@@ -4990,14 +4990,14 @@ psa_status_t psa_aead_abort(psa_aead_operation_t *operation)
     defined(MBEDTLS_PSA_BUILTIN_ALG_TLS12_PRF) || \
     defined(MBEDTLS_PSA_BUILTIN_ALG_TLS12_PSK_TO_MS) || \
     defined(MBEDTLS_PSA_BUILTIN_ALG_TLS12_ECJPAKE_TO_PMS) || \
-    defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC)
+    defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC) || \
+    defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128)
 #define AT_LEAST_ONE_BUILTIN_KDF
 #endif /* At least one builtin KDF */
 
 #if defined(BUILTIN_ALG_ANY_HKDF) || \
     defined(MBEDTLS_PSA_BUILTIN_ALG_TLS12_PRF) || \
-    defined(MBEDTLS_PSA_BUILTIN_ALG_TLS12_PSK_TO_MS) || \
-    defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC)
+    defined(MBEDTLS_PSA_BUILTIN_ALG_TLS12_PSK_TO_MS)
 static psa_status_t psa_key_derivation_start_hmac(
     psa_mac_operation_t *operation,
     psa_algorithm_t hash_alg,
@@ -5095,25 +5095,20 @@ psa_status_t psa_key_derivation_abort(psa_key_derivation_operation_t *operation)
                                  sizeof(operation->ctx.tls12_ecjpake_to_pms.data));
     } else
 #endif /* defined(MBEDTLS_PSA_BUILTIN_ALG_TLS12_ECJPAKE_TO_PMS) */
-#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC)
-    if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg)) {
-        if (operation->ctx.pbkdf2.input_cost != 0U) {
-            operation->ctx.pbkdf2.input_cost = 0U;
-        }
+#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC) || \
+    defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128)
+    if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg) ||
+        kdf_alg == PSA_ALG_PBKDF2_AES_CMAC_PRF_128) {
         if (operation->ctx.pbkdf2.salt != NULL) {
             mbedtls_platform_zeroize(operation->ctx.pbkdf2.salt,
                                      operation->ctx.pbkdf2.salt_length);
             mbedtls_free(operation->ctx.pbkdf2.salt);
         }
-        if (operation->ctx.pbkdf2.password != NULL) {
-            mbedtls_platform_zeroize(operation->ctx.pbkdf2.password,
-                                     operation->ctx.pbkdf2.password_length);
-            mbedtls_free(operation->ctx.pbkdf2.password);
-        }
 
         status = PSA_SUCCESS;
     } else
-#endif /* defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC) */
+#endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC ||
+        * MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128 */
     {
         status = PSA_ERROR_BAD_STATE;
     }
@@ -5175,14 +5170,14 @@ static psa_status_t psa_key_derivation_hkdf_read(psa_hkdf_key_derivation_t *hkdf
 
     while (output_length != 0) {
         /* Copy what remains of the current block */
-        uint8_t n = hash_length - hkdf->bytes_used;
+        uint8_t n = hash_length - hkdf->offset_in_block;
         if (n > output_length) {
             n = (uint8_t) output_length;
         }
-        memcpy(output, hkdf->output_block + hkdf->bytes_used, n);
+        memcpy(output, hkdf->output_block + hkdf->offset_in_block, n);
         output += n;
         output_length -= n;
-        hkdf->bytes_used += n;
+        hkdf->offset_in_block += n;
         if (output_length == 0) {
             break;
         }
@@ -5197,7 +5192,7 @@ static psa_status_t psa_key_derivation_hkdf_read(psa_hkdf_key_derivation_t *hkdf
 
         /* We need a new block */
         ++hkdf->block_number;
-        hkdf->bytes_used = 0;
+        hkdf->offset_in_block = 0;
 
         status = psa_key_derivation_start_hmac(&hkdf->hmac,
                                                hash_alg,
@@ -5440,89 +5435,60 @@ static psa_status_t psa_key_derivation_tls12_ecjpake_to_pms_read(
 }
 #endif
 
-#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC)
+#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC) || \
+    defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128)
 static psa_status_t psa_key_derivation_pbkdf2_generate_block(
     psa_pbkdf2_key_derivation_t *pbkdf2,
-    psa_algorithm_t kdf_alg)
+    psa_algorithm_t prf_alg,
+    uint8_t prf_output_length,
+    psa_key_attributes_t *attributes)
 {
-    psa_status_t status, cleanup_status;
-    
-    psa_algorithm_t hash_alg = PSA_ALG_PBKDF2_HMAC_GET_HASH(kdf_alg);
-    uint8_t hash_length = PSA_HASH_LENGTH(hash_alg);
-    size_t hmac_output_length;
+    psa_status_t status;
+    size_t mac_output_length;
     uint8_t U_i[PSA_HASH_MAX_SIZE];
     uint8_t U_accumulator[PSA_HASH_MAX_SIZE];
-    uint8_t i, j;
-    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+    uint8_t j;
+    size_t i;
 
-    psa_set_key_type(&attributes, PSA_KEY_TYPE_HMAC);
-    psa_set_key_bits(&attributes, PSA_BYTES_TO_BITS(hmac_key_length));
-    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_HASH);
-
-    status = psa_driver_wrapper_mac_compute(
-        &attributes,
-        pbkdf2->password, pbkdf2->password_length,
-        hash_alg,
-        input, input_length,
-        U_i, hash_length, hmac_output_length);
-    status = psa_key_derivation_start_hmac(&hmac,
-                                           hash_alg,
-                                           pbkdf2->password,
-                                           pbkdf2->password_length);
+    uint8_t *input = mbedtls_calloc(pbkdf2->salt_length + 4, 1);
+    memcpy(input, pbkdf2->salt, pbkdf2->salt_length);
+    MBEDTLS_PUT_UINT32_BE(pbkdf2->block_number, input, pbkdf2->salt_length);
+ 
+    status = psa_driver_wrapper_mac_compute(attributes, pbkdf2->password,
+                                            pbkdf2->password_length, prf_alg,
+                                            input, (pbkdf2->salt_length + 4),
+                                            U_i, prf_output_length,
+                                            &mac_output_length);
     if (status != PSA_SUCCESS) {
         goto cleanup;
     }
-    status = psa_mac_update(&hmac, pbkdf2->salt, pbkdf2->salt_length);
-    if (status != PSA_SUCCESS) {
-        goto cleanup;
-    }
-    status = psa_mac_update(&hmac, pbkdf2->block_number,
-                            sizeof(pbkdf2->block_number));
-    if (status != PSA_SUCCESS) {
-        goto cleanup;
-    }
-    status = psa_mac_sign_finish(&hmac, U_i, hash_length,
-                                 &hmac_output_length);
-    if (status != PSA_SUCCESS) {
-        goto cleanup;
-    }
-
-    memcpy(U_accumulator, U_i, hmac_output_length);
+    memcpy(U_accumulator, U_i, mac_output_length);
 
     for (i = 1; i < pbkdf2->input_cost; i++) {
-        status = psa_key_derivation_start_hmac(&hmac,
-                                               hash_alg,
-                                               pbkdf2->password,
-                                               pbkdf2->password_length);
-        if (status != PSA_SUCCESS) {
-            goto cleanup;
-        }
-        status = psa_mac_update(&hmac, U_i, hash_length);
-        if (status != PSA_SUCCESS) {
-            goto cleanup;
-        }
-        status = psa_mac_sign_finish(&hmac, U_i, hash_length,
-                                     &hmac_output_length);
+        status = psa_driver_wrapper_mac_compute(attributes,
+                                                pbkdf2->password,
+                                                pbkdf2->password_length,
+                                                prf_alg, U_i, prf_output_length,
+                                                U_i, prf_output_length,
+                                                &mac_output_length);
         if (status != PSA_SUCCESS) {
             goto cleanup;
         }
 
         // U1 xor U2
-        for (j = 0; j < hash_length; j++) {
+        for (j = 0; j < prf_output_length; j++) {
             U_accumulator[j] ^= U_i[j];
         }
     }
 
-    memcpy(pbkdf2->output_block, U_accumulator, hash_length);
+    memcpy(pbkdf2->output_block, U_accumulator, prf_output_length);
 
 cleanup:
     /* Zeroise buffers to clear sensitive data from memory. */
     mbedtls_platform_zeroize(U_accumulator, PSA_HASH_MAX_SIZE);
     mbedtls_platform_zeroize(U_i, PSA_HASH_MAX_SIZE);
-    cleanup_status = psa_mac_abort(&hmac);
-    if(status == PSA_SUCCESS && cleanup_status != PSA_SUCCESS) {
-        status = cleanup_status;
-    }
+    mbedtls_platform_zeroize(input, sizeof(input));
+    mbedtls_free(input);
     return status;
 }
 
@@ -5533,12 +5499,26 @@ static psa_status_t psa_key_derivation_pbkdf2_read(
     size_t output_length)
 {
     psa_status_t status;
-    psa_algorithm_t hash_alg = PSA_ALG_PBKDF2_HMAC_GET_HASH(kdf_alg);
-    uint8_t hash_length = PSA_HASH_LENGTH(hash_alg);
+    psa_algorithm_t prf_alg;
+    uint8_t prf_output_length;
+    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_bits(&attributes, PSA_BYTES_TO_BITS(pbkdf2->password_length));
+    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_MESSAGE);
+
+    if (kdf_alg == PSA_ALG_PBKDF2_AES_CMAC_PRF_128) {
+        prf_alg = PSA_ALG_CMAC;
+        prf_output_length = 16;
+        psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
+    } else if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg)) {
+        prf_alg = PSA_ALG_HMAC(PSA_ALG_PBKDF2_HMAC_GET_HASH(kdf_alg));
+        prf_output_length = PSA_HASH_LENGTH(prf_alg);
+        psa_set_key_type(&attributes, PSA_KEY_TYPE_HMAC);
+    }
 
     switch (pbkdf2->state) {
         case PSA_PBKDF2_STATE_PASSWORD_SET:
-            pbkdf2->bytes_used = PSA_HASH_LENGTH(hash_alg);
+            /* Initially we need a new block so bytes_used is equal to block size*/
+            pbkdf2->bytes_used = prf_output_length;
             pbkdf2->state = PSA_PBKDF2_STATE_OUTPUT;
             break;
         case PSA_PBKDF2_STATE_OUTPUT:
@@ -5548,8 +5528,7 @@ static psa_status_t psa_key_derivation_pbkdf2_read(
     }
 
     while (output_length != 0) {
-
-        uint8_t n = hash_length - pbkdf2->bytes_used;
+        uint8_t n = prf_output_length - pbkdf2->bytes_used;
         if (n > output_length) {
             n = (uint8_t) output_length;
         }
@@ -5564,13 +5543,12 @@ static psa_status_t psa_key_derivation_pbkdf2_read(
 
         /* We need a new block */
         pbkdf2->bytes_used = 0;
-        for(uint8_t i = 4; i > 0; i--) {
-            if(++(pbkdf2->block_number)[i - 1] != 0) {
-                break;
-            }
-        }
+        pbkdf2->block_number++;
 
-        status = psa_key_derivation_pbkdf2_generate_block(pbkdf2, kdf_alg);
+        printf("\noutput len = %d, block number = %d, bytes used =%d\n", output_length, pbkdf2->block_number, pbkdf2->bytes_used);
+        status = psa_key_derivation_pbkdf2_generate_block(pbkdf2, prf_alg,
+                                                          prf_output_length,
+                                                          &attributes);
         if (status != PSA_SUCCESS) {
             return status;
         }
@@ -5578,7 +5556,8 @@ static psa_status_t psa_key_derivation_pbkdf2_read(
 
     return PSA_SUCCESS;
 }
-#endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC */
+#endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC ||
+        * MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128 */
 
 psa_status_t psa_key_derivation_output_bytes(
     psa_key_derivation_operation_t *operation,
@@ -5633,13 +5612,18 @@ psa_status_t psa_key_derivation_output_bytes(
             &operation->ctx.tls12_ecjpake_to_pms, output, output_length);
     } else
 #endif /* MBEDTLS_PSA_BUILTIN_ALG_TLS12_ECJPAKE_TO_PMS */
-#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC)
-    if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg)) {
-        status = psa_key_derivation_pbkdf2_read(
-            &operation->ctx.pbkdf2, kdf_alg,
-            output, output_length);
+#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC) ||
+    defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128)
+    if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg) ||
+        kdf_alg == PSA_ALG_PBKDF2_AES_CMAC_PRF_128) {
+        status = psa_key_derivation_pbkdf2_read(&operation->ctx.pbkdf2, kdf_alg,
+                                                output, output_length);
+        for(int i = 0; i < output_length; i++){
+            printf("\n output[%d] = %x", i, output[i]);
+        }
     } else
-#endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC */
+#endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC
+        * MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128 */
 
     {
         (void) kdf_alg;
@@ -6062,6 +6046,10 @@ static int is_kdf_alg_supported(psa_algorithm_t kdf_alg)
     if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg)) {
         return 1;
     }
+#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128)
+    if (kdf_alg == PSA_ALG_PBKDF2_AES_CMAC_PRF_128) {
+        return 1;
+    }
 #endif
     return 0;
 }
@@ -6091,7 +6079,11 @@ static psa_status_t psa_key_derivation_setup_kdf(
      * ecjpake to pms) are based on a hash algorithm. */
     psa_algorithm_t hash_alg = PSA_ALG_HKDF_GET_HASH(kdf_alg);
     size_t hash_size = PSA_HASH_LENGTH(hash_alg);
-    if (kdf_alg != PSA_ALG_TLS12_ECJPAKE_TO_PMS) {
+    if (kdf_alg == PSA_ALG_TLS12_ECJPAKE_TO_PMS) {
+        hash_size = PSA_HASH_LENGTH(PSA_ALG_SHA_256);
+    } else if (kdf_alg == PSA_ALG_PBKDF2_AES_CMAC_PRF_128) {
+        hash_size = PSA_BLOCK_CIPHER_BLOCK_MAX_SIZE;
+    } else {
         if (hash_size == 0) {
             return PSA_ERROR_NOT_SUPPORTED;
         }
@@ -6103,8 +6095,6 @@ static psa_status_t psa_key_derivation_setup_kdf(
         if (status != PSA_SUCCESS) {
             return status;
         }
-    } else {
-        hash_size = PSA_HASH_LENGTH(PSA_ALG_SHA_256);
     }
 
     if ((PSA_ALG_IS_TLS12_PRF(kdf_alg) ||
@@ -6120,7 +6110,7 @@ static psa_status_t psa_key_derivation_setup_kdf(
     } else
 #endif /* MBEDTLS_PSA_BUILTIN_ALG_HKDF_EXTRACT ||
           MBEDTLS_PSA_BUILTIN_ALG_TLS12_ECJPAKE_TO_PMS */
-    operation->capacity = 255 * hash_size;
+    operation->capacity = 255 * hash_size; //TODO: Confirm that this applies to CMAC as well
     return PSA_SUCCESS;
 }
 
@@ -6277,13 +6267,13 @@ static psa_status_t psa_hkdf_input(psa_hkdf_key_derivation_t *hkdf,
             if (PSA_ALG_IS_HKDF_EXTRACT(kdf_alg)) {
                 /* The only block of output is the PRK. */
                 memcpy(hkdf->output_block, hkdf->prk, PSA_HASH_LENGTH(hash_alg));
-                hkdf->bytes_used = 0;
+                hkdf->offset_in_block = 0;
             } else
 #endif /* MBEDTLS_PSA_BUILTIN_ALG_HKDF_EXTRACT */
             {
                 /* Block 0 is empty, and the next block will be
                  * generated by psa_key_derivation_hkdf_read(). */
-                hkdf->bytes_used = PSA_HASH_LENGTH(hash_alg);
+                hkdf->offset_in_block = PSA_HASH_LENGTH(hash_alg);
             }
 
             return PSA_SUCCESS;
@@ -6552,7 +6542,8 @@ static psa_status_t psa_tls12_ecjpake_to_pms_input(
 }
 #endif /* MBEDTLS_PSA_BUILTIN_ALG_TLS12_ECJPAKE_TO_PMS */
 
-#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC)
+#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC) || \
+    defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128)
 static psa_status_t psa_pbkdf2_set_input_cost(
     psa_pbkdf2_key_derivation_t *pbkdf2,
     psa_key_derivation_step_t step,
@@ -6565,11 +6556,6 @@ static psa_status_t psa_pbkdf2_set_input_cost(
     if (pbkdf2->state != PSA_PBKDF2_STATE_INIT) {
         return PSA_ERROR_BAD_STATE;
     }
-#if UINT_MAX > 0xFFFFFFFF
-    if (data > 0xFFFFFFFF) {
-        return PSA_ERROR_INVALID_ARGUMENT;
-    }
-#endif
     if (data == 0) {
         return PSA_ERROR_INVALID_ARGUMENT;
     }
@@ -6583,39 +6569,32 @@ static psa_status_t psa_pbkdf2_set_salt(psa_pbkdf2_key_derivation_t *pbkdf2,
                                         const uint8_t *data,
                                         size_t data_length)
 {
-    uint8_t *prev_salt;
-    size_t prev_salt_length;
-
     if (pbkdf2->state != PSA_PBKDF2_STATE_INPUT_COST_SET &&
         pbkdf2->state != PSA_PBKDF2_STATE_SALT_SET) {
         return PSA_ERROR_BAD_STATE;
     }
 
-    if (data_length != 0) {
-        if (pbkdf2->state == PSA_PBKDF2_STATE_INPUT_COST_SET) {
-            pbkdf2->salt = mbedtls_calloc(1, data_length);
-            if (pbkdf2->salt == NULL) {
-                return PSA_ERROR_INSUFFICIENT_MEMORY;
-            }
-
-            memcpy(pbkdf2->salt, data, data_length);
-            pbkdf2->salt_length = data_length;
-        } else if (pbkdf2->state == PSA_PBKDF2_STATE_SALT_SET) {
-            prev_salt = pbkdf2->salt;
-            prev_salt_length = pbkdf2->salt_length;
-            pbkdf2->salt = mbedtls_calloc(1, data_length + prev_salt_length);
-            if (pbkdf2->salt == NULL) {
-                return PSA_ERROR_INSUFFICIENT_MEMORY;
-            }
-
-            memcpy(pbkdf2->salt, prev_salt, prev_salt_length);
-            memcpy(pbkdf2->salt + prev_salt_length, data,
-            data_length);
-            pbkdf2->salt_length += data_length;
-            mbedtls_free(prev_salt);
+    if (pbkdf2->state == PSA_PBKDF2_STATE_INPUT_COST_SET) {
+        pbkdf2->salt = mbedtls_calloc(1, data_length);
+        if (pbkdf2->salt == NULL) {
+            return PSA_ERROR_INSUFFICIENT_MEMORY;
         }
-    } else {
-        return PSA_ERROR_INVALID_ARGUMENT;
+
+        memcpy(pbkdf2->salt, data, data_length);
+        pbkdf2->salt_length = data_length;
+    } else if (pbkdf2->state == PSA_PBKDF2_STATE_SALT_SET) {
+        uint8_t *next_salt;
+
+        next_salt = mbedtls_calloc(1, data_length + pbkdf2->salt_length);
+        if (next_salt == NULL) {
+            return PSA_ERROR_INSUFFICIENT_MEMORY;
+        }
+
+        memcpy(next_salt, pbkdf2->salt, pbkdf2->salt_length);
+        memcpy(next_salt + pbkdf2->salt_length, data, data_length);
+        pbkdf2->salt_length += data_length;
+        mbedtls_free(pbkdf2->salt);
+        pbkdf2->salt = next_salt;
     }
 
     pbkdf2->state = PSA_PBKDF2_STATE_SALT_SET;
@@ -6623,31 +6602,79 @@ static psa_status_t psa_pbkdf2_set_salt(psa_pbkdf2_key_derivation_t *pbkdf2,
     return PSA_SUCCESS;
 }
 
+static psa_status_t psa_pbkdf2_cmac_set_password(const uint8_t *input,
+                                                 size_t input_len,
+                                                 uint8_t *output,
+                                                 size_t *output_len)
+{
+    psa_status_t status = PSA_SUCCESS;
+    if (input_len != PSA_BLOCK_CIPHER_BLOCK_MAX_SIZE) {
+        psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+        uint8_t zeros[16] = {0};
+        psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
+        psa_set_key_bits(&attributes, PSA_BYTES_TO_BITS(input_len));
+        psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_HASH);
+
+        status = psa_driver_wrapper_mac_compute(&attributes,
+                                                zeros, sizeof(zeros),
+                                                PSA_ALG_CMAC, input, input_len,
+                                                output, sizeof(output),
+                                                output_len);
+    } else {
+        memcpy(output, input, input_len);
+        *output_len = PSA_BLOCK_CIPHER_BLOCK_MAX_SIZE;
+    }
+    return status;
+}
+
+
+static psa_status_t psa_pbkdf2_hmac_set_password(psa_algorithm_t hash_alg,
+                                                 const uint8_t *input,
+                                                 size_t input_len,
+                                                 uint8_t *output,
+                                                 size_t *output_len)
+{
+    psa_status_t status = PSA_SUCCESS;
+    if (input_len > PSA_HASH_BLOCK_LENGTH(hash_alg)) {
+        status = psa_hash_compute(hash_alg, input, input_len, output,
+                                  PSA_HMAC_MAX_HASH_BLOCK_SIZE, output_len);
+    } else {
+        memcpy(output, input, input_len);
+        *output_len = PSA_HASH_BLOCK_LENGTH(hash_alg);
+    }
+    return status;
+}
+
 static psa_status_t psa_pbkdf2_set_password(psa_pbkdf2_key_derivation_t *pbkdf2,
+                                            psa_algorithm_t kdf_alg,
                                             const uint8_t *data,
                                             size_t data_length)
 {
+    psa_status_t status = PSA_SUCCESS;
     if (pbkdf2->state != PSA_PBKDF2_STATE_SALT_SET) {
         return PSA_ERROR_BAD_STATE;
     }
 
     if (data_length != 0) {
-        if ()
-        pbkdf2->password = mbedtls_calloc(1, data_length);
-        if (pbkdf2->password == NULL) {
-            return PSA_ERROR_INSUFFICIENT_MEMORY;
+        if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg)) {
+            psa_algorithm_t hash_alg = PSA_ALG_PBKDF2_HMAC_GET_HASH(kdf_alg);
+            status = psa_pbkdf2_hmac_set_password(hash_alg, data, data_length,
+                                                  pbkdf2->password,
+                                                  &pbkdf2->password_length);
+        } else if (kdf_alg == PSA_ALG_PBKDF2_AES_CMAC_PRF_128) {
+            status = psa_pbkdf2_cmac_set_password(data, data_length,
+                                                  pbkdf2->password,
+                                                  &pbkdf2->password_length);
         }
-
-        memcpy(pbkdf2->password, data, data_length);
-        pbkdf2->password_length = data_length;
     }
 
     pbkdf2->state = PSA_PBKDF2_STATE_PASSWORD_SET;
 
-    return PSA_SUCCESS;
+    return status;
 }
 
 static psa_status_t psa_pbkdf2_input(psa_pbkdf2_key_derivation_t *pbkdf2,
+                                     psa_algorithm_t kdf_alg,
                                      psa_key_derivation_step_t step,
                                      const uint8_t *data,
                                      size_t data_length)
@@ -6656,12 +6683,14 @@ static psa_status_t psa_pbkdf2_input(psa_pbkdf2_key_derivation_t *pbkdf2,
         case PSA_KEY_DERIVATION_INPUT_SALT:
             return psa_pbkdf2_set_salt(pbkdf2, data, data_length);
         case PSA_KEY_DERIVATION_INPUT_PASSWORD:
-            return psa_pbkdf2_set_password(pbkdf2, data, data_length);
+            return psa_pbkdf2_set_password(pbkdf2, kdf_alg, data,
+                                           data_length);
         default:
             return PSA_ERROR_INVALID_ARGUMENT;
     }
 }
-#endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC */
+#endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC ||
+        * MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128 */
 /** Check whether the given key type is acceptable for the given
  * input step of a key derivation.
  *
@@ -6757,12 +6786,15 @@ static psa_status_t psa_key_derivation_input_internal(
             &operation->ctx.tls12_ecjpake_to_pms, step, data, data_length);
     } else
 #endif /* MBEDTLS_PSA_BUILTIN_ALG_TLS12_ECJPAKE_TO_PMS */
-#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC)
-    if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg)) {
-        status = psa_pbkdf2_input(
-            &operation->ctx.pbkdf2, step, data, data_length);
+#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC) || \
+    defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128)
+    if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg) ||
+        kdf_alg == PSA_ALG_PBKDF2_AES_CMAC_PRF_128) {
+        status = psa_pbkdf2_input(&operation->ctx.pbkdf2, kdf_alg, step,
+                                  data, data_length);
     } else
-#endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC */
+#endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC ||
+        * MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128 */
     {
         /* This can't happen unless the operation object was not initialized */
         (void) data;
@@ -6786,6 +6818,14 @@ static psa_status_t psa_key_derivation_input_integer_internal(
     psa_status_t status;
     psa_algorithm_t kdf_alg = psa_key_derivation_get_kdf_alg(operation);
 
+#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC) || \
+    defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128)
+    if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg) ||
+        kdf_alg == PSA_ALG_PBKDF2_AES_CMAC_PRF_128) {
+        status = psa_pbkdf2_set_input_cost(&operation->ctx.pbkdf2, step, value);
+    } else
+#endif /* MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC ||
+        * MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128 */
     {
         (void) step;
         (void) value;
