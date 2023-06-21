@@ -5444,51 +5444,63 @@ static psa_status_t psa_key_derivation_pbkdf2_generate_block(
     psa_key_attributes_t *attributes)
 {
     psa_status_t status;
+    psa_mac_operation_t mac_operation = PSA_MAC_OPERATION_INIT;
     size_t mac_output_length;
-    uint8_t U_i[PSA_HASH_MAX_SIZE];
-    uint8_t U_accumulator[PSA_HASH_MAX_SIZE];
-    uint8_t j;
-    size_t i;
+    uint8_t U_i[PSA_MAC_MAX_SIZE];
+    uint8_t *U_accumulator = pbkdf2->output_block;
+    uint64_t i;
+    uint8_t block_counter[4];
 
-    uint8_t *input = mbedtls_calloc(pbkdf2->salt_length + 4, 1);
-    memcpy(input, pbkdf2->salt, pbkdf2->salt_length);
-    MBEDTLS_PUT_UINT32_BE(pbkdf2->block_number, input, pbkdf2->salt_length);
- 
-    status = psa_driver_wrapper_mac_compute(attributes, pbkdf2->password,
-                                            pbkdf2->password_length, prf_alg,
-                                            input, (pbkdf2->salt_length + 4),
-                                            U_i, prf_output_length,
-                                            &mac_output_length);
+    mac_operation.is_sign = 1;
+    mac_operation.mac_size = prf_output_length;
+    MBEDTLS_PUT_UINT32_BE(pbkdf2->block_number, block_counter, 0);
+
+    status = psa_driver_wrapper_mac_sign_setup(&mac_operation,
+                                               attributes,
+                                               pbkdf2->password,
+                                               pbkdf2->password_length,
+                                               prf_alg);
     if (status != PSA_SUCCESS) {
         goto cleanup;
     }
-    memcpy(U_accumulator, U_i, mac_output_length);
+    status = psa_mac_update(&mac_operation, pbkdf2->salt, pbkdf2->salt_length);
+    if (status != PSA_SUCCESS) {
+        goto cleanup;
+    }
+    status = psa_mac_update(&mac_operation, block_counter, sizeof(block_counter));
+    if (status != PSA_SUCCESS) {
+        goto cleanup;
+    }
+    status = psa_mac_sign_finish(&mac_operation, U_i, sizeof(U_i),
+                                 &mac_output_length);
+    if (status != PSA_SUCCESS) {
+        goto cleanup;
+    }
+
+    if (mac_output_length != prf_output_length) {
+        status = PSA_ERROR_CORRUPTION_DETECTED;
+        goto cleanup;
+    }
+
+    memcpy(U_accumulator, U_i, prf_output_length);
 
     for (i = 1; i < pbkdf2->input_cost; i++) {
         status = psa_driver_wrapper_mac_compute(attributes,
                                                 pbkdf2->password,
                                                 pbkdf2->password_length,
                                                 prf_alg, U_i, prf_output_length,
-                                                U_i, prf_output_length,
+                                                U_i, sizeof(U_i),
                                                 &mac_output_length);
         if (status != PSA_SUCCESS) {
             goto cleanup;
         }
 
-        // U1 xor U2
-        for (j = 0; j < prf_output_length; j++) {
-            U_accumulator[j] ^= U_i[j];
-        }
+        mbedtls_xor(U_accumulator, U_accumulator, U_i, prf_output_length);
     }
-
-    memcpy(pbkdf2->output_block, U_accumulator, prf_output_length);
 
 cleanup:
     /* Zeroise buffers to clear sensitive data from memory. */
-    mbedtls_platform_zeroize(U_accumulator, PSA_HASH_MAX_SIZE);
-    mbedtls_platform_zeroize(U_i, PSA_HASH_MAX_SIZE);
-    mbedtls_platform_zeroize(input, sizeof(input));
-    mbedtls_free(input);
+    mbedtls_platform_zeroize(U_i, PSA_MAC_MAX_SIZE);
     return status;
 }
 
@@ -5509,6 +5521,10 @@ static psa_status_t psa_key_derivation_pbkdf2_read(
         prf_alg = PSA_ALG_CMAC;
         prf_output_length = 16;
         psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
+        prf_output_length = PSA_MAC_LENGTH(psa_get_key_type(&attributes),
+                                           PSA_BYTES_TO_BITS(
+                                               pbkdf2->password_length),
+                                           prf_alg);
     } else if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg)) {
         prf_alg = PSA_ALG_HMAC(PSA_ALG_PBKDF2_HMAC_GET_HASH(kdf_alg));
         prf_output_length = PSA_HASH_LENGTH(prf_alg);
@@ -5612,7 +5628,7 @@ psa_status_t psa_key_derivation_output_bytes(
             &operation->ctx.tls12_ecjpake_to_pms, output, output_length);
     } else
 #endif /* MBEDTLS_PSA_BUILTIN_ALG_TLS12_ECJPAKE_TO_PMS */
-#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC) ||
+#if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_HMAC) || \
     defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128)
     if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg) ||
         kdf_alg == PSA_ALG_PBKDF2_AES_CMAC_PRF_128) {
@@ -6046,6 +6062,7 @@ static int is_kdf_alg_supported(psa_algorithm_t kdf_alg)
     if (PSA_ALG_IS_PBKDF2_HMAC(kdf_alg)) {
         return 1;
     }
+#endif
 #if defined(MBEDTLS_PSA_BUILTIN_ALG_PBKDF2_AES_CMAC_PRF_128)
     if (kdf_alg == PSA_ALG_PBKDF2_AES_CMAC_PRF_128) {
         return 1;
@@ -6110,7 +6127,7 @@ static psa_status_t psa_key_derivation_setup_kdf(
     } else
 #endif /* MBEDTLS_PSA_BUILTIN_ALG_HKDF_EXTRACT ||
           MBEDTLS_PSA_BUILTIN_ALG_TLS12_ECJPAKE_TO_PMS */
-    operation->capacity = 255 * hash_size; //TODO: Confirm that this applies to CMAC as well
+    operation->capacity = 255 * hash_size;
     return PSA_SUCCESS;
 }
 
@@ -6612,13 +6629,13 @@ static psa_status_t psa_pbkdf2_cmac_set_password(const uint8_t *input,
         psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
         uint8_t zeros[16] = {0};
         psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
-        psa_set_key_bits(&attributes, PSA_BYTES_TO_BITS(input_len));
-        psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_HASH);
+        psa_set_key_bits(&attributes, PSA_BYTES_TO_BITS(sizeof(zeros)));
+        psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_MESSAGE);
 
         status = psa_driver_wrapper_mac_compute(&attributes,
                                                 zeros, sizeof(zeros),
                                                 PSA_ALG_CMAC, input, input_len,
-                                                output, sizeof(output),
+                                                output, 16U,
                                                 output_len);
     } else {
         memcpy(output, input, input_len);
